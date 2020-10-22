@@ -63,6 +63,7 @@ matrix:
             - libxml2-utils
             
     - env: Linux-s390x-SmokeTest
+      os: linux
       arch: s390x
       script:
         - ./scripts/build-otp
