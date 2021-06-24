@@ -262,3 +262,30 @@ jobs:
             artifacts/*.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+  build-s390x:
+    name: Build Erlang/OTP on s390x
+    runs-on: ubuntu-latest
+    needs: pack
+    
+    steps:
+      - uses: actions/checkout@v2
+      
+      - name: Download source archive
+        uses: actions/download-artifact@v2
+        with:
+          name: otp_git_archive
+          
+      - name: Build Erlang on s390x
+        uses: uraimo/run-on-arch-action@master
+        id: runcmd
+        with:
+          arch: s390x
+          distro: ubuntu18.04
+          shell: /bin/bash
+          run: |
+            apt update && apt install -y g++
+            tar -xzf ./otp_src.tar.gz
+            cd otp
+            export ERL_TOP=`pwd`
+            ./otp_build configure  
