@@ -59,8 +59,14 @@ jobs:
           distro: ubuntu18.04
           shell: /bin/bash
           run: |
-            apt update && apt install -y g++ autoconf libncurses-dev make libssl-dev libwxgtk3.0-dev xsltproc libxml2-utils
+            apt update && apt install -y autoconf fop flex gawk gcc g++ gzip libncurses-dev libssl-dev libxml2-utils make tar unixodbc-dev wget xsltproc openjdk-11-jdk
             tar -xzf ./otp_src.tar.gz
             cd otp
             export ERL_TOP=`pwd`
-            ./otp_build configure  
+            ./configure --prefix=/usr
+            make && make install
+            make release_tests
+            cd release/tests/test_server
+            $ERL_TOP/bin/erl -s ts install -s ts smoke_test batch -s init stop
+            
+     
