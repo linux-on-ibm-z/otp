@@ -59,7 +59,7 @@ jobs:
           distro: ubuntu18.04
           shell: /bin/bash
           run: |
-            apt update && apt install -y autoconf fop flex gawk gcc g++ gzip libncurses-dev libssl-dev libxml2-utils make tar unixodbc-dev wget xsltproc
+            apt update && apt install -y autoconf gcc g++ libncurses-dev libssl-dev libxml2-utils make unixodbc-dev xsltproc
             tar -xzf ./otp_src.tar.gz
             cd otp
             export ERL_TOP=`pwd`
