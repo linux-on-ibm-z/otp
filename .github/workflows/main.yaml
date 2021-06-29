@@ -37,7 +37,73 @@ jobs:
         with:
           name: otp_git_archive
           path: otp_src.tar.gz
-          
+
+
+  build-windows:
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    name: Build Erlang/OTP on Windows
+    runs-on: windows-latest
+    needs: pack
+    steps:
+      - uses: Vampire/setup-wsl@v1
+        with:
+          distribution: Ubuntu-18.04
+
+      - name: Install WSL dependencies
+        run: apt update && apt install -y g++-mingw-w64 gcc-mingw-w64 make autoconf unzip
+
+      - name: Install openssl
+        shell: cmd
+        run: |
+          choco install openssl
+          move "c:\\Program Files\\OpenSSL-Win64" "c:\\OpenSSL-Win64"
+      - name: Download wxWidgets
+        run: |
+          mkdir -p /mnt/c/opt/local64/pgm/
+          cd /mnt/c/opt/local64/pgm/
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.4/wxWidgets-3.1.4.zip
+          unzip wxWidgets-3.1.4.zip -d wxWidgets-3.1.4
+          sed -i -r -e 's/wxUSE_POSTSCRIPT +0/wxUSE_POSTSCRIPT 1/' /mnt/c/opt/local64/pgm/wxWidgets-3.1.4/include/wx/msw/setup.h
+          sed -i -r -e 's/wxUSE_WEBVIEW_EDGE +0/wxUSE_WEBVIEW_EDGE 1/' /mnt/c/opt/local64/pgm/wxWidgets-3.1.4/include/wx/msw/setup.h
+      - name: Install WebView2
+        shell: cmd
+        run: |
+          c:
+          cd c:\\opt\\local64\\pgm\\wxWidgets-3.1.4\\3rdparty
+          nuget install Microsoft.Web.WebView2 -Version 1.0.705.50 -Source https://api.nuget.org/v3/index.json
+          rename Microsoft.Web.WebView2.1.0.705.50 webview2
+      - name: Build wxWidgets
+        shell: cmd
+        run: |
+          c:
+          cd c:\\opt\\local64\\pgm\\wxWidgets-3.1.4\\build\\msw
+          call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\Auxiliary\\Build\\vcvars64.bat"
+          nmake TARGET_CPU=amd64 BUILD=release SHARED=0 DIR_SUFFIX_CPU= -f makefile.vc
+      - name: Download source archive
+        uses: actions/download-artifact@v2
+        with:
+          name: otp_git_archive
+
+      - name: Compile Erlang
+        run: |
+          tar -xzf ./otp_src.tar.gz
+          cd otp
+          export ERL_TOP=`pwd`
+          eval `./otp_build env_win32 x64`
+          ./otp_build configure
+          if cat erts/CONF_INFO || cat lib/*/CONF_INFO || cat lib/*/SKIP || cat lib/SKIP-APPLICATIONS; then exit 1; fi
+          ./otp_build boot -a
+          ./otp_build release -a
+          cp /mnt/c/opt/local64/pgm/wxWidgets-3.1.4/3rdparty/webview2/runtimes/win-x64/native/WebView2Loader.dll $ERL_TOP/release/win32/erts-*/bin/
+          ./otp_build installer_win32
+      - name: Upload installer
+        uses: actions/upload-artifact@v2
+        with:
+          name: otp_prebuilt_win32
+          path: otp/release/win32/otp*.exe
+
   build:
     name: Build Erlang/OTP
     runs-on: ubuntu-latest
@@ -45,7 +111,7 @@ jobs:
 
     strategy:
       matrix:
-        type: [64-bit]
+        type: [64-bit,32-bit,cross-compile,documentation]
       fail-fast: false
 
     steps:
@@ -54,7 +120,6 @@ jobs:
         uses: actions/download-artifact@v2
         with:
           name: otp_git_archive
-      
       - name: Docker login
         uses: docker/login-action@v1
         with:
@@ -62,25 +127,23 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Calculate BASE image
-        uses: uraimo/run-on-arch-action@master
         id: base
-        with:
-          arch: s390x        
-          distro: ubuntu18.04
-          run: |
-            BASE_TAG=$(grep "^FROM" .github/dockerfiles/Dockerfile.${{ matrix.type }} | head -1 | awk '{print $2}')
-            echo "::set-output name=BASE_TAG::${BASE_TAG}"
-            .github/scripts/base-tag "${BASE_TAG}"
-            docker pull ${{ steps.base.outputs.BASE_TAG }}
-            
-            docker build --pull --tag ${{ steps.base.outputs.BASE_TAG }} \
+        run: |
+          BASE_TAG=$(grep "^FROM" .github/dockerfiles/Dockerfile.${{ matrix.type }} | head -1 | awk '{print $2}')
+          echo "::set-output name=BASE_TAG::${BASE_TAG}"
+          .github/scripts/base-tag "${BASE_TAG}"
+      - name: Pull BASE image
+        run: docker pull ${{ steps.base.outputs.BASE_TAG }}
+      - name: Build BASE image
+        run: |
+          docker build --pull --tag ${{ steps.base.outputs.BASE_TAG }} \
             --cache-from ${{ steps.base.outputs.BASE_TAG }} \
             --file .github/dockerfiles/Dockerfile.${{ steps.base.outputs.BASE_TYPE }} \
             --build-arg BASE=${{ steps.base.outputs.BASE }} .
-      
-            docker build --tag otp --file .github/dockerfiles/Dockerfile.${{ matrix.type }} \
+      - name: Build ${{ matrix.type }} image
+        run: |
+          docker build --tag otp --file .github/dockerfiles/Dockerfile.${{ matrix.type }} \
             --build-arg ARCHIVE=otp_src.tar.gz .
-            
         ## Smoke build tests
       - if: matrix.type == '32-bit' || matrix.type == '64-bit' || matrix.type == 'cross-compile'
         name: Run smoke test
@@ -130,3 +193,64 @@ jobs:
         with:
           name: otp_prebuilt
           path: otp_src.tar.gz
+
+  ## If this is a tag that has been pushed we do some release work
+  release:
+    name: Release Erlang/OTP
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') && github.repository == 'erlang/otp'
+    steps:
+      ## This step outputs the tag name and whether the tag is a release or patch
+      ## (all releases have only two version identifiers, while patches have three
+      ##  or more)
+      - name: Get Tag Name
+        id: tag
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          IS_RELEASE=`$(echo $TAG | grep -E '^OTP-[0-9]+\.[0-9]+$' > /dev/null) \
+            && echo "true" || echo "false"`
+          echo "::set-output name=tag::${TAG}"
+          echo "::set-output name=release::${IS_RELEASE}"
+      
+      - uses: actions/checkout@v2
+
+      ## Publish the pre-built archive and docs
+      - name: Download source archive
+        uses: actions/download-artifact@v2
+        with:
+          name: otp_prebuilt
+      - name: Download html docs
+        uses: actions/download-artifact@v2
+        with:
+          name: otp_doc_html
+      - name: Download man docs
+        uses: actions/download-artifact@v2
+        with:
+          name: otp_doc_man
+
+      ## We add the correct version name into the file names
+      ## and create the hash files for all assets
+      - name: Create pre-build and doc archives
+        run: .github/scripts/create-artifacts.sh artifacts ${{ steps.tag.outputs.tag }}
+
+      - name: Build OTP Bundle
+        if: steps.tag.outputs.release == 'true'
+        run: |
+          scripts/bundle-otp ${{ steps.tag.outputs.tag }}
+      ## Create hash files
+      - name: Create pre-build and doc archives
+        run: |
+          shopt -s nullglob
+          cd artifacts
+          md5sum {*.tar.gz,*.txt} > MD5.txt
+          sha256sum {*.tar.gz,*.txt} > SHA256.txt
+      - name: Upload pre-built and doc tar archives
+        uses: softprops/action-gh-release@v1
+        with:
+          name: OTP ${{ steps.tag.outputs.vsn }}
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
